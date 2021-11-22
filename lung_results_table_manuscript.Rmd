@@ -1,0 +1,236 @@
+---
+title: "Policy simulations for Melanoma for Women with 50% Stage Shift"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, echo=FALSE, message=FALSE}
+#--------------------------------------------------------------------------------
+# Run anything of substance?
+#--------------------------------------------------------------------------------
+# Set default to FALSE, so it doesn't stall building the package
+runNow <- TRUE
+# Define nsims here
+nsims <- 100
+#-------------------------------------------------------------------------------
+# Setup 
+#-------------------------------------------------------------------------------
+library(reshape)
+library(parallel)
+library(ggplot2)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(bcimodel)
+data(ex1)
+
+#--------------------------------------------------------------------------------
+# Knitr
+#--------------------------------------------------------------------------------
+opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE)
+#-------------------------------------------------------------------------------
+# Stats will be contained in "eafr" list object
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+# Stats will be contained in "colomb*" list object
+#-------------------------------------------------------------------------------
+lungUS <- vector('list', length=length(ex1))
+names(lungUS) <- names(ex1)
+propERpos<-1
+pop_chars <- list(male = data.frame(male = c(0), prop = c(1)))
+overd1<-0
+overd2<-11
+ppv<-6.5
+advanced1<-77.8/100
+advanced2<-61.5/100
+shift<-0.79
+prob_early_sc<-0.03 
+prob_early_ns<-0.97
+prob_adv_sc<-0.147
+prob_adv_ns<-0.853
+surr<-5
+withinstageshift<-1
+withinHR1<-0.9
+withinHR2<-0.9
+if(surr==5){survv<-5} else if(surr==10){survv<-10}
+#-------------------------------------------------------------------------------
+# Statistics for Colombia 
+#-------------------------------------------------------------------------------
+```
+
+```{r}
+load(file = "incidence_lung.rda")
+load(file = "othercausemort.rda")
+```
+```{r echo=FALSE}
+source("compile_naturalhistmelanoma.R",local = TRUE)
+source("simpolicies_melanoma.R", local = TRUE)
+source("databases_melanoma.R", local = TRUE)
+source("initialize_melanoma.R", local=TRUE)
+source("outcomes_melanoma.R", local=TRUE)
+source("cantrance_melanoma.R", local=TRUE)
+source("earlydetect_melanoma.R", local = TRUE)
+source("general_melanoma.R", local = TRUE)
+source("initialize_melanoma.R", local = TRUE)
+source("outcomes_melanoma.R", local=TRUE)
+source("parallelized_melanoma.R", local=TRUE)
+source("screentreatlibrary_melanoma.R", local=TRUE)
+source("systime_melanoma.R", local=TRUE)
+source("treatment_melanoma.R", local=TRUE)
+source("compile_nathist_lung.R", local=TRUE)
+othercausemort_2017<-othercausemortality
+othercausemort_2017[,5]<-2.8/3.3*othercausemort_2017[,5]
+incidence_lungg<-incidence_lung
+incidence_lungg[,6]<-3.1/3.3*incidence_lungg[,6]
+```
+
+## Policies to investigate
+
+```{r}
+lungUS$pol  <- data.frame(num=c(1:6),
+                                    id=c('nohis','nocur','noid', 'schis','sccur','scid'),
+                                    name=c('M1: No Screening-Historic Treatments',
+                                           'M2: No Screening-Cur Novel Treatments',
+                                           'M3: No Screening-Ideal Novel Treatments',
+                                           'M4: LDCT Screening-Historic Treatments',
+                                           'M5: LDCT Screening-Cur Novel Treatments',
+                                           'M6: LDCT Screening-Ideal Novel Treatments'),
+                                           pairnum=c(NA,NA,NA, c(1, 2, 3)),
+                                           earlydetHR=c(rep(1, 3), rep(0.79, 3)),
+                                           stringsAsFactors=FALSE)
+
+kable(lungUS$pol)
+```
+
+```{r, echo=FALSE}
+# Early SCLC and NSCLC mortality rates
+    early.sclc.mrate.co = cumsurv_to_exprate(0.357, year=survv)
+    early.nsclc.mrate.co= cumsurv_to_exprate(0.685, year=survv)
+```
+
+```{r, echo=FALSE}
+  # Advanced SCLC and NSCLC mortality rates
+   late.sclc.mrate.co = cumsurv_to_exprate(0.069, year=survv)
+   late.nsclc.mrate.co= cumsurv_to_exprate(0.159, year=survv)
+```
+
+Converting from survival to mortality rate gives us:
+```{r}
+lungUS$nh<-compile_naturalhist_lung(prop_adv = advanced1, mortrates=c(early.sclc.mrate.co, early.nsclc.mrate.co, late.sclc.mrate.co, late.nsclc.mrate.co),subgroup_names = c('SCLC'=0.5, 'NSCLC'=0.5), sub_probs_early = c(prob_early_sc,prob_early_ns), sub_probs_adv =c(prob_adv_sc,prob_adv_ns))
+```
+
+```{r}
+#-------------------------------------------------------------------------------
+# Silently define the stageshift mapping
+#-------------------------------------------------------------------------------
+lungUS$map <- create_stageshift_map(lungUS$nh)
+```
+
+## Treatment
+
+```{r}
+#-------------------------------------------------------------------------------
+# Silently translate policies into treatment matrix: EAST AFRICA
+#-------------------------------------------------------------------------------
+    #Treatment
+     lungUS$tx <- data.frame(expand.grid(txSSid=c("Surgery Only",
+                                                    "Chemo",
+                                                    "IO Monotherapy",
+                                                    "IO Combination",
+                                                    "EGFR Inhibitor",
+                                                    "ALK inhibitor",
+                                                    "Other"),
+                                              SSno=1:nrow(lungUS$nh)),
+                                  stringsAsFactors=FALSE)
+    ntreat <- nrow(lungUS$tx)
+    ntx <- length(unique(lungUS$tx$txSSid))
+    # Proportions sum to 1 within stages
+    lungUS$tx <- transform(lungUS$tx, 
+                                 SSid=c(rep('Early.SCLC', ntx), rep('Early.NSCLC', ntx), 
+                                        rep('Advanced.SCLC', ntx), rep('Advanced.NSCLC', ntx)), 
+                                 txSSno=1:ntreat)
+    lungUS$tx <- transform(lungUS$tx,
+                                 txHR=c(1, 1, 1, 1, 1, 1, 1,
+                                        1, 1, 1, 1, 1, 1, 1,
+                                         1, 1, 0.7, 0.7, 1, 1, 1,
+                                         1, 1, 0.66, 0.30, 0.69, 0.76, 1))
+    advA <- vector('list', length=length(unique(lungUS$tx$SSid)))
+    # Order of SSid: Early Advanced
+    # Order of treatments: None, Interferon, Chemo, Checkpoint, Targeted
+    #LDCT:
+    advA[[1]] <- c(100, 0, 0, 0, 0, 0, 0)
+    advA[[2]] <- c(100, 0, 0, 0, 0, 0, 0)
+    advA[[3]] <- c(0,100, 0,0,0,0,0)
+    advA[[4]] <- c(0,100, 0,0,0,0,0)
+    # XR:
+    advB<-advA
+    advB[[3]] <- c(0,0,0,100,0,0,0)
+    advB[[4]] <- c(0,44,22,17,14,3,0)
+    advC<-advB
+    advC[[3]] <- c(0,0,0,100,0,0,0)
+    advC[[4]] <- c(0,0,0,76,19,5,0)
+    # Put together complete vectors
+    advA.v <- do.call('c', advA)
+    advB.v <- do.call('c', advB)
+     advC.v <- do.call('c', advC)
+    props <- data.frame(advA.v,advB.v,advC.v,advA.v,advB.v,advC.v)
+    
+    # colSums(props)  
+    colnames(props) <- lungUS$pol$id
+    props2 <- props
+    colnames(props2) <- lungUS$pol$name
+    toprint <- data.frame(lungUS$tx, props2, stringsAsFactors=FALSE, check.names=FALSE)
+    lungUS$tx <- data.frame(lungUS$tx, props, stringsAsFactors=FALSE)
+    lungUS$tx <- data.frame(lungUS$tx, stringsAsFactors=FALSE)
+    kable(lungUS$tx)
+```
+
+### Colombia
+# Results 
+
+## Legends and Footnotes
+### Tables
+Legend: Melanoma outcomes, for 100,000 men ages [insert] at the time of intervention. Results are the average across 100 simulations.
+Footnote: The ARR for a given strategy is equivalent to the decrease in cumulative melanoma mortality compared to the M0 policy. Small discrepancies reflect rounding error.
+
+
+```{r, message=FALSE}
+#-------------------------------------------------------------------------------
+# Silently run model, ages 65-80
+#-------------------------------------------------------------------------------
+if (runNow) {
+ 
+    # Model
+  manuscript_NLST <- simpolicies_mel(lungUS$pol, lungUS$nh, lungUS$tx,overd1,overd2,ppv,advanced1,advanced2,withinstageshift,withinHR1,withinHR2,
+                                                 incsource='RISK',
+                                                 mortsource='All', 
+                                                 returnstats=c('mean','lower', 
+                                                               'upper'), 
+                                                 popsize =20000,sims=100,
+                                                 futimes=c(10,25),
+                                                 minage=50, maxage=80,
+                                                 denom=20000)
+      # Runtime
+     
+     # Format and save results
+     detach("package:dplyr", unload = TRUE)
+  
+     finaltab_NLST2 <- format_bounds_list(manuscript_NLST, 
+                                     paren=TRUE, includemean=TRUE, 
+                                      digits=c(0,0,0,0,3,0,0,2,0,0,3),
+                                     compileall=TRUE)
+     write.csv(finaltab_NLST2, file=paste0('RESULTS_NLST', nsims, 'sims.csv'),
+                                    row.names=FALSE)
+}
+```
+
+```{r}
+if (runNow) {
+    kable(finaltab_NLST2)
+}
+```
+
+
+
+
